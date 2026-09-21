@@ -1,9 +1,0 @@
-# MyVisualizer color schemes
-# Format (space separated):
-#   <name> <bottom_RGB> <top_RGB>          -> one-color gradient scheme
-#   <name> <bottom_RGB> <top_RGB> <alt_bottom_RGB> <alt_top_RGB>   -> two-tone scheme (alternates every bar, e.g. Police)
-# RGB colors are 6-digit hex (RRGGBB), '#' optional.
-# Note: for two-tone schemes the bar brightness also pulses with a traveling wave.
-
-Blue 12356B 7FD4FF
-Red 3B0A0A FF4040
