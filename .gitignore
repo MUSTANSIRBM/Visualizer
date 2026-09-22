@@ -11,7 +11,8 @@ linux/build/
 linux/dist/
 windows/build/
 windows/dist/
-windows/installer/
+windows/installer/*
+!windows/installer/MyVisualizer-Setup.exe
 
 # Logs & temp
 *.log

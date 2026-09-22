@@ -35,6 +35,7 @@ Display modes: **Bottom-Up** (default) and **Radial** spiral (press `M`).
 ### Windows
 
 - **Download** — grab the latest installer from [GitHub Releases](https://github.com/MUSTANSIRBM/Visualizer/releases/latest/download/MyVisualizer-Setup.exe)
+  (or [download the exe directly from the repo](https://github.com/MUSTANSIRBM/Visualizer/blob/main/windows/installer/MyVisualizer-Setup.exe)).
 - **Install** — run `MyVisualizer-Setup.exe` and click through the wizard:
   1. It installs to `%LOCALAPPDATA%\Programs\MyVisualizer` (no admin needed).
   2. Start Menu entry is created; tick "desktop icon" if you want one.
