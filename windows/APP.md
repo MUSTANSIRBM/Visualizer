@@ -7,20 +7,42 @@ A real-time audio spectrum visualizer for Windows. It captures whatever the comp
 | File | Purpose |
 |---|---|
 | `visualizer.py` | Entire app: audio capture, DSP, rendering, input handling |
+| `source.py` | "Now playing" detector (WASAPI audio sessions → app, optional SMTC media title) |
 | `colors.txt` | Color scheme definitions (hex), loaded at startup |
 | `icon.ico` / `icon.png` | App icon (exe/taskbar + window icon) |
 | `make_icon.py` | Regenerates the icon (multi-size PNG + ICO) |
-| `build.bat` | Builds `dist\MyVisualizer\` with PyInstaller |
-| `MyVisualizer.spec` | PyInstaller config (bundles `pyaudiowpatch`, `colors.txt`, `icon.png`) |
+| `test_bounds.py` | Border-pixel guard: verifies bars never draw outside the window |
+| `build.bat` | Runs the bounds guard, then builds `dist\MyVisualizer\` with PyInstaller |
+| `MyVisualizer.spec` | PyInstaller config (bundles `pyaudiowpatch`, `pycaw`, `winsdk`, `colors.txt`, `icon.png`) |
 | `install_script.iss` | Inno Setup script that packages `dist\MyVisualizer\` into an installer (`installer\MyVisualizer-Setup.exe`) |
 
-Single-file app — no UI framework, no config files, no external assets at runtime.
+A single GUI app — no terminal mode, no UI framework, no external assets at runtime.
+
+## Persisted Settings
+
+The app remembers its settings between runs in a small JSON file:
+
+- `%APPDATA%\MyVisualizer\config.json`
+
+Stored fields: `bars`, `scheme` (by name), `show_ui`, `width`, `height`, `mode`. Values are clamped on load (`bars` 8–128, window size capped to the current desktop so it never opens off-screen), and the config is re-written atomically (temp file + rename) on every change and on quit. The window is always resizable and always starts windowed (no persisted fullscreen). Delete the file to reset to defaults.
+
+## Now Playing Detector (`source.py`)
+
+Every second, a background thread reports what's currently audible:
+
+1. **WASAPI peak detection** (`pycaw`): enumerate the output sessions bound to the speakers and read each session's peak volume, so only apps that are *actually making sound* count (paused/silent ones are skipped, and the app's own process is ignored).
+2. **SMTC media session** (`winsdk`): Windows' GlobalSystemMediaTransportControls session for the loudest session. When a site/app registers one (browsers, Spotify, VLC, …) this gives the real, up-to-date song/artist independently of windows.
+3. **Window title fallback** (only when it's accurate): exact PID match against top-level windows. For one-window apps (VLC, Spotify desktop, foobar2000) it yields the current track/window title. For browsers, whose renderer processes own no top-level windows, it does **not** guess the active tab — it just reports the browser name.
+
+The UI shows the app name (e.g. "Spotify" / "Opera") and a LIVE/SILENT/ERROR status. If nothing is audible it shows **Nothing playing**.
 
 ## Dependencies
 
 - `pygame` — windowing, rendering, event loop
 - `numpy` — ring buffer, FFT, vectorized math
 - `pyaudiowpatch` — WASAPI audio loopback (captures *system output* audio, unlike microphone capture)
+- `pycaw` / `comtypes` — WASAPI audio-session enumeration (for the Now Playing box)
+- `winsdk` — Windows Media Transport Controls (SMTC) for accurate media titles
 - `pyinstaller` (build only)
 
 ## Runtime Flow (`main()`)
@@ -29,20 +51,14 @@ Single-file app — no UI framework, no config files, no external assets at runt
 main()
 ├─ enable_dpi_awareness()        # fix blurry scaling
 ├─ set_dark_title_bar()          # dark window title bar
-├─ pygame.init()                 # 1280x720 resizable window
+├─ pygame.init()                 # resizable window (saved size)
 ├─ window = np.hanning(FFT_N)    # FFT window function
 ├─ capture = AudioCapture()      # open WASAPI loopback stream
 └─ loop:
-   ├─ handle events (keys, F11, resize, window close)
+   ├─ handle events (keys, live resize, window close)
    ├─ history = capture.history()     # latest FFT_N audio samples
-   ├─ rms = sqrt(mean(history^2))     # loudness estimate
-   ├─ db = compute_bands(history, ...)# FFT -> log-spaced dB bands
-   ├─ gate, floor = silence_gate(...) # open/close silence gate
-   ├─ gain = auto_gain(db, gain)      # normalize to DB_HEAD
-   ├─ target = db_to_frac(db, gain)   # dB -> 0..1 bar target
-   ├─ smooth_levels(smooth, target)   # attack/release smoothing
-   ├─ levels = smooth * gate          # silence suppression
-   ├─ draw bars (flat gradient columns)
+   ├─ levels = analyze(history,...)  # gate->auto-gain->smooth->levels in one step
+   ├─ draw_bars(screen, mode,...)    # Bottom-Up / Radial
    ├─ draw UI overlay (if shown)
    └─ flip, tick(60)
 ```
@@ -83,6 +99,7 @@ main()
 - Dark background `(4, 4, 9)`.
 - `nbars` default 40 (range 8–128), 2px gap; bar width is computed to fill the window.
 - **Flat bars** — each bar is a plain rectangle from the bottom of the window to its level (no rounded caps).
+- Bars stop ~8% short of the window edges so they never clip into the borders even at full volume (guaranteed by `test_bounds.py` before every build).
 - **Smooth per-pixel gradient** — `_gradient_surface` builds each column with one color per pixel row (via numpy + `pygame.surfarray`), so a single bar is one continuous gradient with *no visible color banding*.
 - Colors come from `colors.txt`, not the code. Each line is `<name> <bottom_hex> <top_hex> [alt_bottom_hex alt_top_hex]`. Two-tone schemes (Neon, Sunset) alternate two gradients bar-by-bar and add a traveling brightness wave. Bar brightness scales with its level.
 
@@ -90,22 +107,33 @@ main()
 
 Blue, Red, Violet, Emerald, Amber, Teal, Pink, Gold — single dark-themed gradients; Neon and Sunset — two-tone (alternating + wave).
 
+### Display modes (press `M` to cycle)
+
+| # | Mode | Look |
+|---|---|---|
+| 0 | **Bottom-Up** | bars rise from the bottom edge (default) |
+| 1 | **Radial** | bars fan out around a central circle, radiating from its border, with rounded tips |
+
+The active mode is saved to the config file and restored on next launch.
+
 ### UI overlay (`draw_ui`)
-- Semi-transparent box top-left showing: status (`LIVE` / `SILENT` / `ERROR`), device name, FPS, bar count, sample rate, color scheme, and control hints.
+- Bottom-Up: small semi-transparent box top-left.
+- Radial: a **circular info bubble centered inside the spiral's inner circle** — text is clipped to the circle so it never pokes outside.
+- Shows the Now Playing source (app name), status, FPS, bars, scheme, mode, and control hints.
 
 ## Controls
 
 | Key | Action |
 |---|---|
 | Close window (X) | Quit |
-| `F11` | Toggle fullscreen (remembers window size) |
-| `+` / `=` | More bars (+4, max 128) |
-| `-` | Fewer bars (−4, min 8) |
+| `+` / `=` / Numpad `+` | More bars (+4, max 128) |
+| `-` / Numpad `-` | Fewer bars (−4, min 8) |
+| `M` | Cycle display mode (Bottom-Up / Radial) |
 | `F` | Toggle UI overlay |
 | `R` | Reopen capture device |
 | `C` | Cycle color scheme (all schemes in `colors.txt`) |
 
-Note: `Esc` intentionally does not quit — use the window close button.
+Note: `Esc` intentionally does not quit — use the window close button. Keys auto-repeat while held (delay 400ms, repeat 40ms), so holding `+`/`-` continuously adjusts bar count.
 
 ## Key Tunables (top of `visualizer.py`)
 
@@ -120,15 +148,21 @@ Note: `Esc` intentionally does not quit — use the window close button.
 | `MIN/MAX_FREQ` | band edge limits |
 | `MIN/MAX/DEFAULT_BARS` | bar count limits |
 
+## CLI Flags
+
+- `--verbose` — print per-second status lines to stdout (useful when running from source).
+- `--bars N` — override the saved bar count for this session (8–128).
+
 ## Build
 
 `build.bat`:
 1. Activates `.venv` (creates it if missing, installs `requirements.txt`).
-2. Runs `PyInstaller --onedir --windowed --name MyVisualizer --collect-all pyaudiowpatch --add-data "colors.txt;." --add-data "icon.png;." --icon "icon.ico" visualizer.py`.
-3. Output: `dist\MyVisualizer\` (exe + `_internal` deps).
+2. Runs `test_bounds.py` (border-pixel guard) and **aborts if it fails**.
+3. Builds the app: `PyInstaller --onedir --windowed --name MyVisualizer --collect-all pyaudiowpatch --collect-all comtypes --collect-all pycaw --collect-all winsdk --add-data "colors.txt;." --add-data "icon.png;." --icon "icon.ico" visualizer.py`.
+4. Output: `dist\MyVisualizer\` (exe + `_internal` deps).
 
-Notes: the app uses **onedir** (not onefile) — onefile builds crash on this Python 3.14 setup, while onedir runs cleanly and starts faster. `--collect-all pyaudiowpatch` ships the DLLs that enable WASAPI loopback in the frozen exe. `console=False` means no terminal window. `--icon icon.ico` sets the exe icon; `icon.png` + `pygame.display.set_icon` set the runtime window/taskbar icon.
+Notes: the app uses **onedir** (not onefile) — onefile builds crash on this Python setup, while onedir runs cleanly and starts faster. `--collect-all pyaudiowpatch` ships the DLLs that enable WASAPI loopback in the frozen exe, `--collect-all comtypes` ships the COM type-library support needed by pycaw, and `--collect-all winsdk` bundles the SMTC WinRT projection. `--icon icon.ico` sets the exe icon; `icon.png` + `pygame.display.set_icon` set the runtime window/taskbar icon.
 
 ## Installer
 
-`install_script.iss` (Inno Setup) packages `dist\MyVisualizer\` into `installer\MyVisualizer-Setup.exe`, which installs the app and a start-menu/desktop shortcut on the target machine.
+`install_script.iss` (Inno Setup) packages `dist\MyVisualizer\` into `installer\MyVisualizer-Setup.exe`, which installs the single GUI app and a start-menu/desktop shortcut. There is no terminal integration and no PATH modification.

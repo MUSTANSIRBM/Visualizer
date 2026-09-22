@@ -13,17 +13,55 @@ Runs on **Windows** (WASAPI loopback) and **Linux** (PulseAudio/PipeWire monitor
 - **Flat bars with per-pixel gradients** — numpy-driven column rendering with zero visible color banding.
 - **10 built-in color schemes** — single-gradient (Blue, Red, Violet, Emerald, Amber, Teal, Pink, Gold) and two-tone animated (Neon, Sunset), with bar brightness scaled to level.
 - **Auto-gain with silence gate** — bars ride the music and drop flat during silence, no manual tuning.
-- **Fullscreen, resizable window, dark title bar** (Windows), and an optional on-screen UI overlay with live stats.
+- **Now Playing detector** — shows the app that's actually making sound (via WASAPI peak + Windows SMTC media sessions).
+- **Resizable window, dark title bar** (Windows), and an optional on-screen UI overlay with live stats.
 - **Single-file core** — no UI framework, no runtime config, no external assets.
+
+Display modes: **Bottom-Up** (default) and **Radial** spiral (press `M`).
 
 | Key | Action |
 |---|---|
-| `F11` | Toggle fullscreen |
+| `M` | Cycle display mode (Bottom-Up / Radial) |
 | `+` / `=` | More bars (up to 128) |
 | `-` | Fewer bars (down to 8) |
 | `F` | Toggle UI overlay |
 | `R` | Reopen capture device |
 | `C` | Cycle color schemes |
+
+---
+
+## Download & Install
+
+### Windows
+
+- **Download** — grab the latest installer from [GitHub Releases](https://github.com/MUSTANSIRBM/Visualizer/releases/latest/download/MyVisualizer-Setup.exe)
+- **Install** — run `MyVisualizer-Setup.exe` and click through the wizard:
+  1. It installs to `%LOCALAPPDATA%\Programs\MyVisualizer` (no admin needed).
+  2. Start Menu entry is created; tick "desktop icon" if you want one.
+  3. Launch from the Start Menu, desktop icon, or the "Run now" checkbox at the end.
+- **Uninstall** — Windows Settings → Apps → MyVisualizer.
+- **Build from source instead** — see [Getting Started](#getting-started) → Windows.
+
+### Linux
+
+No installer package yet — build and install from source:
+
+1. Make sure **PipeWire or PulseAudio** is running. Optionally install `pulseaudio-utils` / `pipewire` for the primary capture path (a `sounddevice` loopback fallback is bundled).
+2. Run once from source:
+
+   ```bash
+   cd linux
+   ./run.sh        # creates .venv, installs deps, launches the app
+   ```
+
+3. Or build a standalone bundle and install it system-wide (current user):
+
+   ```bash
+   ./build.sh      # outputs dist/MyVisualizer/
+   ./install.sh    # installs to ~/.local/share + app-menu entry + `myvisualizer` launcher
+   ```
+
+4. Launch from your app menu, or run `myvisualizer`.
 
 ---
 
@@ -72,27 +110,30 @@ Captured samples land in a fixed-size ring buffer (`FFT_N = 2048`), read safely 
 ├── README.md               ← this file
 ├── .gitignore
 ├── linux/                  ← Linux edition
-│   ├── visualizer.py       # entire app (capture, DSP, rendering)
-│   ├── colors.txt          # color scheme definitions
-│   ├── icon.png            # app icon
-│   ├── make_icon.py        # regenerates the icon
-│   ├── requirements.txt    # runtime dependencies
-│   ├── run.sh              # run from source
-│   ├── build.sh            # PyInstaller build
-│   ├── MyVisualizer.spec   # PyInstaller config
-│   ├── install.sh          # install to ~/.local + menu entry
-│   ├── APP.md              # in-depth Linux docs
-│   └── INSTALLER.md        # installer docs
+    │   ├── visualizer.py       # entire app (capture, DSP, rendering)
+    │   ├── source.py           # Now Playing detector
+    │   ├── colors.txt          # color scheme definitions
+    │   ├── icon.png            # app icon
+    │   ├── make_icon.py        # regenerates the icon
+    │   ├── requirements.txt    # runtime dependencies
+    │   ├── run.sh              # run from source
+    │   ├── build.sh            # PyInstaller build
+    │   ├── MyVisualizer.spec   # PyInstaller config
+    │   ├── install.sh          # install to ~/.local + menu entry
+    │   └── APP.md              # in-depth Linux docs
 └── windows/                ← Windows edition
     ├── visualizer.py       # entire app (capture, DSP, rendering)
+    ├── source.py           # Now Playing detector (pycaw + winsdk SMTC)
     ├── colors.txt          # color scheme definitions
     ├── icon.ico / icon.png # app icons
     ├── make_icon.py        # regenerates the icons
-    ├── build.bat           # PyInstaller build
+    ├── test_bounds.py      # border-pixel guard (run before every build)
+    ├── requirements.txt    # runtime dependencies
+    ├── run.bat             # run from source (creates .venv, installs deps)
+    ├── build.bat           # bounds test + PyInstaller build
     ├── MyVisualizer.spec   # PyInstaller config
     ├── install_script.iss  # Inno Setup installer script
-    ├── APP.md              # in-depth Windows docs
-    └── INSTALLER.md        # installer docs
+    └── APP.md              # in-depth Windows docs
 ```
 
 ---
@@ -124,7 +165,13 @@ Install system-wide (current user):
 
 ```bat
 cd windows
-build.bat         // creates .venv, installs deps, builds dist\MyVisualizer\
+run.bat           :: creates .venv, installs deps, launches the app from source
+```
+
+Build a standalone bundle (runs the border-pixel guard first):
+
+```bat
+build.bat         :: outputs dist\MyVisualizer\
 ```
 
 Package an installer with Inno Setup using `install_script.iss` (produces `MyVisualizer-Setup.exe`).
@@ -139,6 +186,8 @@ Package an installer with Inno Setup using `install_script.iss` (produces `MyVis
 | `numpy` | Ring buffer, FFT, vectorized math |
 | `sounddevice` | Loopback capture fallback (Linux) |
 | `pyaudiowpatch` | WASAPI loopback capture (Windows) |
+| `pycaw` / `comtypes` | Audio-session peak detection (Windows) |
+| `winsdk` | Windows Media Transport Controls / SMTC (Windows) |
 | `pyinstaller` | Bundling the app (build only) |
 
 ---
@@ -147,10 +196,3 @@ Package an installer with Inno Setup using `install_script.iss` (produces `MyVis
 
 - [Linux deep-dive](linux/APP.md)
 - [Windows deep-dive](windows/APP.md)
-- [Windows installer notes](windows/INSTALLER.md)
-
----
-
-## License
-
-All rights reserved. © 2026 MUSTANSIRBM.

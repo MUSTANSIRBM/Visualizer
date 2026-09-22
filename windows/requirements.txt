@@ -1,0 +1,6 @@
+pygame>=2.5
+numpy>=1.26
+pyaudiowpatch>=0.2.12
+pycaw>=20240210
+comtypes>=1.2
+winsdk>=1.0.0b10

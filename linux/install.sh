@@ -24,6 +24,7 @@ cat > "$APP_BIN" <<'EOF'
 exec "$HOME/.local/share/MyVisualizer/MyVisualizer" "$@"
 EOF
 chmod +x "$APP_BIN"
+rm -f "$BIN_DIR/myvisualizer-tui"
 
 mkdir -p "$HOME/.local/share/icons/hicolor/512x512/apps"
 cp icon.png "$APP_ICON"
@@ -41,4 +42,5 @@ Terminal=false
 Categories=AudioVideo;Audio;
 EOF
 
-echo "Installed. Launch with '$APP_BIN' (or look for MyVisualizer in your app menu)."
+echo "Installed. Launch MyVisualizer from your app menu,"
+echo "or run 'myvisualizer' to start it."

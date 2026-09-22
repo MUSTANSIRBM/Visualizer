@@ -11,4 +11,10 @@ linux/build/
 linux/dist/
 windows/build/
 windows/dist/
-windows/installer/*.exe
+windows/installer/
+
+# Logs & temp
+*.log
+out.txt
+err.txt
+Screenshot*.png

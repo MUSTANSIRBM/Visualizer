@@ -1,4 +1,6 @@
+import argparse
 import ctypes
+import json
 import math
 import os
 import sys
@@ -8,6 +10,8 @@ import time
 import numpy as np
 import pygame
 import pyaudiowpatch as pyaudio
+
+from source import SourceMonitor
 
 RATE_DEFAULT = 48000
 CHUNK = 1024
@@ -29,8 +33,24 @@ MIN_BARS = 8
 MAX_BARS = 128
 DEFAULT_BARS = 40
 TARGET_FPS = 60
+MIN_WIN_W = 360
+MIN_WIN_H = 240
+
+MODE_UP = 0
+MODE_RADIAL = 1
+MODES = ["Bottom-Up", "Radial"]
 
 COLOR_SCHEMES = []
+
+
+class DspState:
+    def __init__(self, nbars):
+        self.nbars = nbars
+        self.smooth = np.zeros(nbars, dtype=np.float32)
+        self.gate = 0.0
+        self.opened = False
+        self.noise_floor = 0.0
+        self.gain = 0.0
 
 
 def parse_hex(h):
@@ -43,6 +63,64 @@ def resource_path(name):
     if base:
         return os.path.join(base, name)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+
+
+def config_path():
+    cached = getattr(config_path, "_cached", None)
+    if cached:
+        return cached
+    base = os.environ.get("APPDATA")
+    if base:
+        path = os.path.join(base, "MyVisualizer")
+    else:
+        path = os.path.join(os.path.expanduser("~"), ".myvisualizer")
+    os.makedirs(path, exist_ok=True)
+    path = os.path.join(path, "config.json")
+    config_path._cached = path
+    return path
+
+
+def load_config():
+    default_cfg = {
+        "bars": DEFAULT_BARS,
+        "scheme": None,
+        "show_ui": True,
+        "width": 1280,
+        "height": 720,
+        "mode": 0,
+    }
+    cfg = dict(default_cfg)
+    path = config_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            stored = json.load(f)
+        if isinstance(stored, dict):
+            cfg.update(stored)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        print(f"Failed to load config: {exc}")
+    cfg.pop("fullscreen", None)
+    cfg["bars"] = max(MIN_BARS, min(MAX_BARS, int(cfg.get("bars", DEFAULT_BARS))))
+    cfg["show_ui"] = bool(cfg.get("show_ui", True))
+    cfg["mode"] = max(0, min(len(MODES) - 1, int(cfg.get("mode", 0))))
+    try:
+        cfg["width"] = max(320, int(cfg.get("width")))
+        cfg["height"] = max(240, int(cfg.get("height")))
+    except Exception:
+        cfg["width"], cfg["height"] = default_cfg["width"], default_cfg["height"]
+    return cfg
+
+
+def save_config(cfg):
+    path = config_path()
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, path)
+    except Exception as exc:
+        print(f"Failed to save config: {exc}")
 
 
 def load_color_schemes(path):
@@ -72,6 +150,14 @@ def load_color_schemes(path):
 def enable_dpi_awareness():
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
+
+def set_taskbar_identify():
+    try:
+        app_id = ctypes.create_unicode_buffer("MyVisualizer.AudioVisualizer.1")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
     except Exception:
         pass
 
@@ -244,6 +330,23 @@ def silence_gate(gate, rms, noise_floor, opened):
     return max(min(gate, 1.0), 0.0), floor
 
 
+def analyze(history, rate, nbars, window, st):
+    rms = float(np.sqrt(np.mean(history * history)))
+    db = compute_bands(history, rate, nbars, window)
+    st.gate, st.noise_floor = silence_gate(st.gate, rms, st.noise_floor, st.opened)
+    if st.gate > 0.5:
+        st.opened = True
+    if st.gate > 0.3:
+        st.gain = auto_gain(db, st.gain)
+    target = db_to_frac(db, st.gain)
+    if target.shape[0] != st.smooth.shape[0]:
+        st.smooth = np.zeros(nbars, dtype=np.float32)
+    smooth_levels(st.smooth, target)
+    if st.gate < 0.35:
+        st.smooth *= 0.70
+    return st.smooth * st.gate
+
+
 def scheme_colors(frac, index, scheme, frame):
     top = scheme["top"]
     bottom = scheme["bottom"]
@@ -278,9 +381,80 @@ def draw_gradient_column(surface, x, w, col_top, col_h, cb, ct):
     surface.blit(_gradient_surface(cb, ct, w, col_h), (x, col_top))
 
 
-def draw_ui(surface, fps, nbars, capture, gate, size, scheme_name):
+def linear_bar_rects(nbars, i, hgt, size):
+    cur_w, cur_h = size
+    bar_gap = 2
+    bar_w = (cur_w - nbars * bar_gap) // nbars
+    if bar_w < 2:
+        bar_gap = 1
+        bar_w = (cur_w - nbars * bar_gap) // nbars
+    if bar_w < 1:
+        bar_w = 1
+        bar_gap = 1
+    bar_stride = bar_w + bar_gap
+    hgt = max(0, min(hgt, int(cur_h * 0.92)))
+    x = min(i * bar_stride, cur_w - bar_w)
+    return [(x, cur_h - hgt, bar_w, hgt)]
+
+
+def draw_bars(surface, mode, levels, scheme, frame):
+    cur_w, cur_h = surface.get_size()
+    nbars = levels.shape[0]
+
+    if mode == MODE_UP:
+        for i in range(nbars):
+            lev = float(levels[i])
+            hgt = int(round(lev * cur_h))
+            if hgt < 1:
+                continue
+            top, bottom = scheme_colors(lev, i, scheme, frame)
+            for x, col_top, bw, hh in linear_bar_rects(nbars, i, hgt, (cur_w, cur_h)):
+                draw_gradient_column(surface, x, bw, col_top, hh, top, bottom)
+
+    else:  # MODE_RADIAL
+        cx, cy = cur_w // 2, cur_h // 2
+        base_r = max(24.0, min(cur_w, cur_h) * 0.14)
+        max_r = max(base_r + 12.0, min(cur_w, cur_h) * 0.48)
+        step = 2.0 * math.pi / nbars
+        pygame.draw.circle(surface, (66, 66, 96), (cx, cy), int(base_r), 2)
+        for i in range(nbars):
+            lev = float(levels[i])
+            if lev <= 0.02:
+                continue
+            length = (max_r - base_r) * lev
+            ang = -math.pi / 2 + i * step
+            half = step * 0.38
+            a1, a2 = ang - half, ang + half
+            bx1 = cx + math.cos(a1) * base_r
+            by1 = cy + math.sin(a1) * base_r
+            bx2 = cx + math.cos(a2) * base_r
+            by2 = cy + math.sin(a2) * base_r
+            tx1 = cx + math.cos(a1) * (base_r + length)
+            ty1 = cy + math.sin(a1) * (base_r + length)
+            tx2 = cx + math.cos(a2) * (base_r + length)
+            ty2 = cy + math.sin(a2) * (base_r + length)
+            top, _ = scheme_colors(lev, i, scheme, frame)
+            pygame.draw.polygon(
+                surface, top, [(bx1, by1), (bx2, by2), (tx2, ty2), (tx1, ty1)]
+            )
+            mx, my = (tx1 + tx2) / 2.0, (ty1 + ty2) / 2.0
+            tip_w = math.hypot(tx2 - tx1, ty2 - ty1)
+            pygame.draw.circle(surface, top, (int(mx), int(my)), max(1, int(tip_w / 2)))
+        pygame.draw.circle(surface, (8, 8, 18), (cx, cy), int(base_r * 0.82))
+
+
+def _trunc(text, font, max_w):
+    if font.size(text)[0] <= max_w:
+        return text
+    while text and font.size(text + "\u2026")[0] > max_w:
+        text = text[:-1]
+    return text + "\u2026"
+
+
+def draw_ui(surface, fps, nbars, capture, gate, size, scheme_name, mode_name,
+            mode, source_snap):
     font = pygame.font.Font(None, 24)
-    small = pygame.font.Font(None, 20)
+    small = pygame.font.Font(None, 19)
 
     if capture.error is not None:
         status, st_color = f"ERROR: {capture.error[:40]}", (255, 90, 90)
@@ -289,141 +463,193 @@ def draw_ui(surface, fps, nbars, capture, gate, size, scheme_name):
     else:
         status, st_color = "LIVE", (90, 255, 90)
 
-    dev = capture.device_name or "No device"
-    if len(dev) > 42:
-        dev = dev[:40] + "..."
+    src_name, _, _ = source_snap
+    cur_w, cur_h = size
+    accent = (210, 220, 235)
+    dim = (140, 155, 185)
+
+    if mode == MODE_RADIAL:
+        cx, cy = cur_w // 2, cur_h // 2
+        base_r = max(24.0, min(cur_w, cur_h) * 0.14)
+        small = pygame.font.Font(None, 19)
+        head_f = pygame.font.Font(None, 24)
+        tiny = pygame.font.Font(None, 15)
+        R = max(36, int(base_r * 0.97))
+        line_h = 17
+        lines = []
+        if src_name:
+            peak = "  playing" if st_color == (90, 255, 90) else "  " + status.lower()
+            lines.append((head_f, f"{src_name}{peak}", st_color))
+        else:
+            lines.append((head_f, "Nothing playing", dim))
+        lines.append((small, f"{status.lower()} \u2022 {scheme_name} \u2022 {mode_name}", dim))
+        lines.append((small, f"{int(fps)} fps \u2022 {nbars} bars", accent))
+        lines.append((tiny, "C col  M mode  +/- bars  F UI", (108, 122, 152)))
+        n = len(lines)
+        bubble = pygame.Surface((R * 2, R * 2), pygame.SRCALPHA)
+        pygame.draw.circle(bubble, (0, 0, 0, 168), (R, R), R)
+        pygame.draw.circle(bubble, (90, 140, 200, 110), (R, R), R, 1)
+        surface.blit(bubble, (cx - R, cy - R))
+        y = cy - (n * line_h) // 2
+        for f, text, color in lines:
+            dy = (y + line_h // 2) - cy
+            chord = int(2.0 * math.sqrt(max(1.0, R * R - dy * dy))) - 14
+            text = _trunc(text or "", f, max(40, chord))
+            w = f.size(text)[0]
+            surface.blit(f.render(text, True, color), (cx - w // 2, y))
+            y += line_h
+        return
 
     pad = 12
-    box_w = 380
-    box_h = 140
+    gap_line = 20
+    box_w = 360
+    box_h = 112
     bg = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
-    bg.fill((0, 0, 0, 170))
+    bg.fill((0, 0, 0, 160))
     surface.blit(bg, (pad, pad))
 
-    x = pad + 12
+    x = pad + 14
     y = pad + 10
-    surface.blit(font.render(f"Status: {status}", True, st_color), (x, y)); y += 24
-    surface.blit(small.render(f"Device: {dev}", True, (200, 210, 225)), (x, y)); y += 22
-    surface.blit(small.render(f"FPS: {fps:.0f} | Bars: {nbars} | {RATE_DEFAULT // 1000}kHz | {scheme_name}", True, (200, 210, 225)), (x, y)); y += 22
-    surface.blit(small.render(f"C color  +/- bars  R device  F11 fs  F UI", True, (140, 160, 200)), (x, y))
-    _ = size
+    if src_name:
+        surface.blit(font.render(src_name, True, st_color), (x, y)); y += gap_line
+        surface.blit(small.render(f"now playing \u00b7 {status.lower()} \u2022 {scheme_name} \u2022 {mode_name}",
+                                  True, dim), (x, y)); y += gap_line
+    else:
+        surface.blit(font.render("Nothing playing", True, dim), (x, y)); y += gap_line
+        surface.blit(small.render(f"{status.lower()} \u2022 {scheme_name} \u2022 {mode_name}",
+                                  True, dim), (x, y)); y += gap_line
+    surface.blit(small.render(f"{fps:.0f} fps \u2022 {nbars} bars \u2022 C col  M mode  +/- bars  F UI",
+                              True, (120, 135, 165)), (x, y))
 
 
 def main():
     global COLOR_SCHEMES
+    parser = argparse.ArgumentParser(
+        description="MyVisualizer - real-time audio spectrum visualizer.")
+    parser.add_argument("--verbose", action="store_true",
+                        help="print live status lines to stdout")
+    parser.add_argument("--bars", type=int, default=None,
+                        help=f"initial number of bars ({MIN_BARS}-{MAX_BARS}); overrides saved setting")
+    args = parser.parse_args()
+
     try:
         COLOR_SCHEMES = load_color_schemes(resource_path("colors.txt"))
     except Exception as exc:
         print(f"Failed to load colors.txt: {exc}")
         sys.exit(1)
+
+    verbose = args.verbose
     enable_dpi_awareness()
     pygame.init()
+    pygame.key.set_repeat(400, 40)
+
+    cfg = load_config()
+    nbars = max(MIN_BARS, min(MAX_BARS, args.bars if args.bars is not None else cfg["bars"]))
+    scheme_name = cfg.get("scheme")
+    scheme_names = [s["name"] for s in COLOR_SCHEMES]
+    scheme_index = scheme_names.index(scheme_name) if scheme_name in scheme_names else 0
+    show_ui = cfg["show_ui"]
+    mode = cfg["mode"]
+    width, height = cfg["width"], cfg["height"]
+
+    set_taskbar_identify()
     try:
         pygame.display.set_icon(pygame.image.load(resource_path("icon.png")))
     except Exception:
         pass
     pygame.display.set_caption("Audio Visualizer")
-    width, height = 1280, 720
+    dw, dh = pygame.display.get_desktop_sizes()[0]
+    width = min(width, dw)
+    height = min(height, dh)
     screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
     set_dark_title_bar()
-    window_size = (width, height)
+    window_size = screen.get_size()
     clock = pygame.time.Clock()
 
     window = np.hanning(FFT_N).astype(np.float32)
     capture = AudioCapture()
+    source_mon = SourceMonitor()
 
-    nbars = DEFAULT_BARS
-    show_ui = True
-    fullscreen = False
     running = True
-    scheme_index = 0
-
-    smooth = np.zeros(nbars, dtype=np.float32)
-    gate = 0.0
-    opened = False
-    noise_floor = 0.0
-    gain = 0.0
+    st = DspState(nbars)
     frame = 0
+    pending_size = None
+
+    def persist(key, value):
+        cfg[key] = value
+        save_config(cfg)
 
     while running:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            elif event.type in (pygame.VIDEORESIZE, pygame.WINDOWSIZECHANGED):
+                if event.type == pygame.VIDEORESIZE:
+                    ew, eh = event.w, event.h
+                else:
+                    ew, eh = event.x, event.y
+                ew = max(ew, MIN_WIN_W)
+                eh = max(eh, MIN_WIN_H)
+                if (ew, eh) != screen.get_size():
+                    pending_size = (ew, eh)
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_F11:
-                    if not fullscreen:
-                        window_size = screen.get_size()
-                    fullscreen = not fullscreen
-                    if fullscreen:
-                        dw, dh = pygame.display.get_desktop_sizes()[0]
-                        screen = pygame.display.set_mode((dw, dh), pygame.FULLSCREEN)
-                    else:
-                        screen = pygame.display.set_mode(window_size, pygame.RESIZABLE)
-                        set_dark_title_bar()
-                elif event.key in (pygame.K_PLUS, pygame.K_EQUALS):
+                if event.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
                     nbars = min(nbars + 4, MAX_BARS)
-                    smooth = np.zeros(nbars, dtype=np.float32)
-                elif event.key == pygame.K_MINUS:
+                    st = DspState(nbars)
+                    persist("bars", nbars)
+                elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
                     nbars = max(nbars - 4, MIN_BARS)
-                    smooth = np.zeros(nbars, dtype=np.float32)
+                    st = DspState(nbars)
+                    persist("bars", nbars)
+                elif event.key == pygame.K_m:
+                    mode = (mode + 1) % len(MODES)
+                    persist("mode", mode)
                 elif event.key == pygame.K_f:
                     show_ui = not show_ui
+                    persist("show_ui", show_ui)
                 elif event.key == pygame.K_r:
                     capture.reopen()
-                    smooth = np.zeros(nbars, dtype=np.float32)
+                    st = DspState(nbars)
                 elif event.key == pygame.K_c:
                     scheme_index = (scheme_index + 1) % len(COLOR_SCHEMES)
+                    persist("scheme", COLOR_SCHEMES[scheme_index]["name"])
+
+        if pending_size is not None:
+            window_size = pending_size
+            screen = pygame.display.set_mode(pending_size, pygame.RESIZABLE)
+            pending_size = None
 
         cur_w, cur_h = screen.get_size()
         screen.fill((4, 4, 9))
 
         history = capture.history()
-        rms = float(np.sqrt(np.mean(history * history)))
-        db = compute_bands(history, capture.rate, nbars, window)
-        gate, noise_floor = silence_gate(gate, rms, noise_floor, opened)
-        if gate > 0.5:
-            opened = True
-        if gate > 0.3:
-            gain = auto_gain(db, gain)
-        target = db_to_frac(db, gain)
-        if target.shape[0] != smooth.shape[0]:
-            smooth = np.zeros(nbars, dtype=np.float32)
-        smooth_levels(smooth, target)
-        if gate < 0.35:
-            smooth *= 0.70
-        levels = smooth * gate
-
-        bar_gap = 2
-        total = nbars * bar_gap
-        bar_w = (cur_w - total) // nbars
-        if bar_w < 2:
-            bar_gap = 1
-            total = nbars * bar_gap
-            bar_w = (cur_w - total) // nbars
-        if bar_w < 1:
-            bar_w = 1
-        bar_stride = bar_w + bar_gap
-        for i in range(nbars):
-            lev = float(levels[i])
-            hgt = int(round(lev * cur_h))
-            if hgt < 1:
-                continue
-            if hgt > cur_h:
-                hgt = cur_h
-            x = min(i * bar_stride, cur_w - bar_w)
-            scheme = COLOR_SCHEMES[scheme_index]
-            top, bottom = scheme_colors(lev, i, scheme, frame)
-            draw_gradient_column(screen, x, bar_w, cur_h - hgt, hgt, top, bottom)
+        levels = analyze(history, capture.rate, nbars, window, st)
+        draw_bars(screen, mode, levels, COLOR_SCHEMES[scheme_index], frame)
 
         if show_ui:
-            draw_ui(screen, clock.get_fps(), nbars, capture, gate, (cur_w, cur_h),
-                    COLOR_SCHEMES[scheme_index]["name"])
+            draw_ui(screen, clock.get_fps(), nbars, capture, st.gate, (cur_w, cur_h),
+                    COLOR_SCHEMES[scheme_index]["name"], MODES[mode], mode,
+                    source_mon.snapshot())
+
+        if verbose and frame % 60 == 0:
+            status = "ERROR" if capture.error else ("SILENT" if st.gate < 0.5 else "LIVE")
+            err = f" [{capture.error}]" if capture.error else ""
+            print(f"[{status}] fps={clock.get_fps():5.1f} bars={nbars:3d} "
+                  f"mode={MODES[mode]} "
+                  f"src={capture.device_name} scheme={COLOR_SCHEMES[scheme_index]['name']}{err}", flush=True)
 
         pygame.display.flip()
         clock.tick(TARGET_FPS)
         frame += 1
 
+    cfg["bars"] = nbars
+    cfg["scheme"] = COLOR_SCHEMES[scheme_index]["name"]
+    cfg["show_ui"] = show_ui
+    cfg["mode"] = mode
+    cfg["width"], cfg["height"] = screen.get_size()
+    save_config(cfg)
     capture.close()
+    source_mon.close()
     pygame.quit()
     sys.exit(0)
 

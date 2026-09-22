@@ -7,6 +7,7 @@ A real-time audio spectrum visualizer for Linux. It captures whatever the comput
 | File | Purpose |
 |---|---|
 | `visualizer.py` | Entire app: audio capture, DSP, rendering, input handling |
+| `source.py` | Best-effort "now playing" detector (reads active PipeWire/PulseAudio streams) |
 | `colors.txt` | Color scheme definitions (hex), loaded at startup |
 | `icon.png` | App icon (window + installer/desktop icon) |
 | `make_icon.py` | Regenerates the icon (PNG) |
@@ -16,7 +17,21 @@ A real-time audio spectrum visualizer for Linux. It captures whatever the comput
 | `MyVisualizer.spec` | PyInstaller config (bundles `sounddevice`, `colors.txt`, `icon.png`) |
 | `install.sh` | Installs the built app to `~/.local/` with a launcher + desktop entry |
 
-Single-file app — no UI framework, no config files, no external assets at runtime.
+Single-file app — no UI framework, no external assets at runtime.
+
+## Persisted Settings
+
+The app remembers its settings between runs in a small JSON file at:
+
+- `~/.config/MyVisualizer/config.json` (or `$XDG_CONFIG_HOME` if set)
+
+Stored fields: `bars`, `scheme` (by name), `show_ui`, `fullscreen`, `width`, `height`. Values are clamped on load (`bars` 8–128, window size capped to the current desktop so it never opens off-screen), and the config is re-written atomically (temp file + rename) on every change and on quit. Delete the file to reset to defaults.
+
+## Now Playing Detector (`source.py`)
+
+A background thread polls every second for active output streams — via `pactl list sink-inputs` (PulseAudio/pipewire-pulse) or `pw-dump` (PipeWire) — and reports the app/browser that is currently making sound, with a friendly name (Spotify, VLC, Chrome, …). When the stream carries a track title (e.g. `media.title` from a music player) it shows that too.
+
+Exactly like the Windows build this is surfaced as a small top-left box (Bottom-Up/Mirror), **centered inside the spiral's inner circle** (Radial), and as `Now: <app> – <title>` on the terminal-mode footer. If neither `pactl` nor `pw-dump` is available, or nothing is audible, it shows **Nothing playing**.
 
 ## System Requirements
 
@@ -34,6 +49,8 @@ Single-file app — no UI framework, no config files, no external assets at runt
 - `sounddevice` — PortAudio bindings, used as loopback capture fallback
 - `pyinstaller` (build only)
 
+The same pipeline (capture → FFT → gate → smooth) powers two frontends of **one app**: the **GUI window** and the **terminal mode**, the latter like cava. Bars stop ~8% short of the window edges so they never clip into the borders even at full volume.
+
 ## Runtime Flow (`main()`)
 
 ```
@@ -44,15 +61,9 @@ main()
 └─ loop:
    ├─ handle events (keys, F11, resize, window close)
    ├─ history = capture.history()     # latest FFT_N audio samples
-   ├─ rms = sqrt(mean(history^2))     # loudness estimate
-   ├─ db = compute_bands(history, ...)# FFT -> log-spaced dB bands
-   ├─ gate, floor = silence_gate(...) # open/close silence gate
-   ├─ gain = auto_gain(db, gain)      # normalize to DB_HEAD
-   ├─ target = db_to_frac(db, gain)   # dB -> 0..1 bar target
-   ├─ smooth_levels(smooth, target)   # attack/release smoothing
-   ├─ levels = smooth * gate          # silence suppression
+   ├─ levels = analyze(history,...)  # gate->auto-gain->smooth->levels in one step
    ├─ draw bars (flat gradient columns)
-   ├─ draw UI overlay (if shown)
+   ├─ draw UI overlay (if shown)     # + Now Playing box
    └─ flip, tick(60)
 ```
 
@@ -114,8 +125,18 @@ It opens a `sounddevice.InputStream` whose callback downmixes to mono and pushes
 
 Blue, Red, Violet, Emerald, Amber, Teal, Pink, Gold — single dark-themed gradients; Neon and Sunset — two-tone (alternating + wave).
 
+### Display modes (press `M` to cycle)
+
+| # | Mode | Look |
+|---|---|---|
+| 0 | **Bottom-Up** | bars rise from the bottom edge (default) |
+| 1 | **Mirror** | bars grow up *and* down from a center line (base color at the middle) |
+| 2 | **Radial** | bars fan out around a central circle, radiating from its border, with rounded tips |
+
+The active mode is saved to the config file and restored on next launch.
+
 ### UI overlay (`draw_ui`)
-- Semi-transparent box top-left showing: status (`LIVE` / `SILENT` / `ERROR`), device name, FPS, bar count, sample rate, color scheme, and control hints.
+- Small semi-transparent box top-left (Bottom-Up/Mirror) or **centered inside the spiral's inner circle** (Radial) showing the Now Playing source (app + what's playing), plus FPS, bars, scheme, mode, and control hints. Bars stop ~8% short of the window edges.
 
 ## Controls
 
@@ -123,13 +144,23 @@ Blue, Red, Violet, Emerald, Amber, Teal, Pink, Gold — single dark-themed gradi
 |---|---|
 | Close window (X) | Quit |
 | `F11` | Toggle fullscreen (remembers window size) |
-| `+` / `=` | More bars (+4, max 128) |
-| `-` | Fewer bars (−4, min 8) |
+| `+` / `=` / Numpad `+` | More bars (+4, max 128) |
+| `-` / Numpad `-` | Fewer bars (−4, min 8) |
+| `M` | Cycle display mode (Bottom-Up / Mirror / Radial) |
 | `F` | Toggle UI overlay |
 | `R` | Reopen capture device |
 | `C` | Cycle color scheme (all schemes in `colors.txt`) |
 
-Note: `Esc` intentionally does not quit — use the window close button.
+Note: `Esc` intentionally does not quit — use the window close button. Keys auto-repeat while held (delay 400ms, repeat 40ms), so holding `+`/`-` continuously adjusts bar count.
+
+## Terminal Mode
+
+The app is a **single program** with two frontends. Run it **inside a terminal** and it renders cava-style bars in that terminal automatically (it detects the TTY); launch it from the app menu (or pass `--gui`) and it opens the GUI window.
+
+- From source: `./run.sh --tui` (or `python visualizer.py --terminal`, or just run it in a terminal — it auto-detects the console).
+- Installed: just run `myvisualizer` from a terminal (`--gui` forces the window).
+
+The bars auto-fit your terminal width/height, colored with the active color scheme, half-block cells for smooth vertical gradients. Controls: `C` cycles schemes (saved to the same config), `Esc`/`Q`/`X` quit. The footer shows the currently audible source as `Now: <app> – <title>` (same detector as the GUI box). The terminal is restored on exit. Requires an interactive terminal (a real TTY).
 
 ## Key Tunables (top of `visualizer.py`)
 
@@ -152,7 +183,7 @@ Note: `Esc` intentionally does not quit — use the window close button.
 ./run.sh
 ```
 
-Creates `.venv` on first run, installs `requirements.txt`, and launches `visualizer.py`.
+Creates `.venv` on first run, installs `requirements.txt`, and launches `visualizer.py`. Add `--tui` to run the terminal (cava-style) frontend.
 
 ### Build a standalone bundle
 
@@ -178,8 +209,6 @@ Output: `dist/MyVisualizer/` (launcher + `_internal` deps). `--collect-all sound
 Requires a completed `./build.sh` (`dist/MyVisualizer/MyVisualizer`). It:
 
 1. Copies the bundle to `~/.local/share/MyVisualizer/`.
-2. Installs a launcher script `~/.local/bin/myvisualizer`.
+2. Installs a launcher script `~/.local/bin/myvisualizer`. Run it **from a terminal** for the cava-style view, or from the app menu for the GUI window (`myvisualizer --gui` forces the window even from a terminal).
 3. Installs the icon to `~/.local/share/icons/hicolor/512x512/apps/myvisualizer.png`.
 4. Adds a desktop entry `myvisualizer.desktop` so the app appears in the application menu.
-
-Launch it with `myvisualizer` or from the app menu.
