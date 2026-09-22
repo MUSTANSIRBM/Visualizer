@@ -3,7 +3,7 @@
 ; Output: installer\MyVisualizer-Setup.exe
 
 #define MyAppName "MyVisualizer"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "MyVisualizer"
 #define MyAppExeName "MyVisualizer.exe"
 
@@ -25,6 +25,10 @@ WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+AppMutex=MyVisualizer_Mutex
+CloseApplications=yes
+CloseApplicationsFilter=MyVisualizer.exe
+RestartApplications=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

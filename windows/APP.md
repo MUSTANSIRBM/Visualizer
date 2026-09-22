@@ -58,7 +58,7 @@ main()
    ├─ handle events (keys, live resize, window close)
    ├─ history = capture.history()     # latest FFT_N audio samples
    ├─ levels = analyze(history,...)  # gate->auto-gain->smooth->levels in one step
-   ├─ draw_bars(screen, mode,...)    # Bottom-Up / Radial
+   ├─ draw_bars(screen, mode,...)    # Bottom-Up / Radial / Mirror / Ring
    ├─ draw UI overlay (if shown)
    └─ flip, tick(60)
 ```
@@ -99,7 +99,7 @@ main()
 - Dark background `(4, 4, 9)`.
 - `nbars` default 40 (range 8–128), 2px gap; bar width is computed to fill the window.
 - **Flat bars** — each bar is a plain rectangle from the bottom of the window to its level (no rounded caps).
-- Bars stop ~8% short of the window edges so they never clip into the borders even at full volume (guaranteed by `test_bounds.py` before every build).
+- Bars stop ~8% short of the window edges so they never clip into the borders even at full volume (guaranteed by `test_bounds.py` before every build, now for all four modes).
 - **Smooth per-pixel gradient** — `_gradient_surface` builds each column with one color per pixel row (via numpy + `pygame.surfarray`), so a single bar is one continuous gradient with *no visible color banding*.
 - Colors come from `colors.txt`, not the code. Each line is `<name> <bottom_hex> <top_hex> [alt_bottom_hex alt_top_hex]`. Two-tone schemes (Neon, Sunset) alternate two gradients bar-by-bar and add a traveling brightness wave. Bar brightness scales with its level.
 
@@ -113,12 +113,14 @@ Blue, Red, Violet, Emerald, Amber, Teal, Pink, Gold — single dark-themed gradi
 |---|---|---|
 | 0 | **Bottom-Up** | bars rise from the bottom edge (default) |
 | 1 | **Radial** | bars fan out around a central circle, radiating from its border, with rounded tips |
+| 2 | **Mirror** | each bar grows from the horizontal center line both upward and downward — a symmetric butterfly around the middle of the screen |
+| 3 | **Ring** | bars are drawn as annular segments between an inner circle and a fixed outer ring; the ring "swells" with the music |
 
 The active mode is saved to the config file and restored on next launch.
 
 ### UI overlay (`draw_ui`)
-- Bottom-Up: small semi-transparent box top-left.
-- Radial: a **circular info bubble centered inside the spiral's inner circle** — text is clipped to the circle so it never pokes outside.
+- Box modes (Bottom-Up, Mirror): small semi-transparent box top-left.
+- Circular modes (Radial, Ring): a **circular info bubble centered inside the spiral/ring's inner circle** — text is clipped to the circle so it never pokes outside.
 - Shows the Now Playing source (app name), status, FPS, bars, scheme, mode, and control hints.
 
 ## Controls
@@ -128,7 +130,7 @@ The active mode is saved to the config file and restored on next launch.
 | Close window (X) | Quit |
 | `+` / `=` / Numpad `+` | More bars (+4, max 128) |
 | `-` / Numpad `-` | Fewer bars (−4, min 8) |
-| `M` | Cycle display mode (Bottom-Up / Radial) |
+| `M` | Cycle display mode (Bottom-Up / Radial / Mirror / Ring) |
 | `F` | Toggle UI overlay |
 | `R` | Reopen capture device |
 | `C` | Cycle color scheme (all schemes in `colors.txt`) |
@@ -166,3 +168,11 @@ Notes: the app uses **onedir** (not onefile) — onefile builds crash on this Py
 ## Installer
 
 `install_script.iss` (Inno Setup) packages `dist\MyVisualizer\` into `installer\MyVisualizer-Setup.exe`, which installs the single GUI app and a start-menu/desktop shortcut. There is no terminal integration and no PATH modification.
+
+### Updating an existing install
+
+Because the `AppId` and install directory (`{localappdata}\Programs\MyVisualizer`) never change, re-running the same `MyVisualizer-Setup.exe` **updates the app in place**:
+
+- `AppMutex=MyVisualizer_Mutex` + `CloseApplications` — the app holds the `MyVisualizer_Mutex` named mutex for its whole lifetime, so the installer detects a running copy and auto-closes it before overwriting (and relaunches it when done, via `RestartApplications`). No manual "close the app first" step needed.
+- All files use `ignoreversion` so the new build overwrites the old one.
+- User settings are unaffected: they live in `%APPDATA%\MyVisualizer\config.json` (plus the `colors.txt` shipped with the app), never in the install folder, so the color scheme, bar count, window size, and mode all survive an update.

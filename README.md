@@ -17,11 +17,11 @@ Runs on **Windows** (WASAPI loopback) and **Linux** (PulseAudio/PipeWire monitor
 - **Resizable window, dark title bar** (Windows), and an optional on-screen UI overlay with live stats.
 - **Single-file core** — no UI framework, no runtime config, no external assets.
 
-Display modes: **Bottom-Up** (default) and **Radial** spiral (press `M`).
+Display modes: **Bottom-Up** (default), **Radial** spiral, **Mirror** butterfly, and **Ring** (press `M`). Running the same setup file over an existing install updates the app in place without losing settings.
 
 | Key | Action |
 |---|---|
-| `M` | Cycle display mode (Bottom-Up / Radial) |
+| `M` | Cycle display mode (Bottom-Up / Radial / Mirror / Ring) |
 | `+` / `=` | More bars (up to 128) |
 | `-` | Fewer bars (down to 8) |
 | `F` | Toggle UI overlay |
@@ -40,6 +40,7 @@ Display modes: **Bottom-Up** (default) and **Radial** spiral (press `M`).
   1. It installs to `%LOCALAPPDATA%\Programs\MyVisualizer` (no admin needed).
   2. Start Menu entry is created; tick "desktop icon" if you want one.
   3. Launch from the Start Menu, desktop icon, or the "Run now" checkbox at the end.
+- **Update** — re-running `MyVisualizer-Setup.exe` over an existing install upgrades the app in place: your color scheme, bar count, and window settings (stored in `%APPDATA%\MyVisualizer`) are kept, and if the app is running it is closed automatically (and relaunched) by the installer.
 - **Uninstall** — Windows Settings → Apps → MyVisualizer.
 - **Build from source instead** — see [Getting Started](#getting-started) → Windows.
 

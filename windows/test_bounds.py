@@ -23,16 +23,27 @@ SIZES = [
 BARS_COUNT = 128
 SENTINEL = (255, 0, 255)
 
+ALL_MODES = [V.MODE_UP, V.MODE_MIRROR, V.MODE_RADIAL, V.MODE_RING]
+
+
+def assert_rect(r, w, h, ctx):
+    x, top, bw, hh = r
+    assert x >= 0 and x + bw <= w, (ctx, r)
+    assert top >= 0 and top + hh <= h, (ctx, r)
+
 
 def check(mode, nbars, size):
     w, h = size
-    for i in range(nbars):
-        for rect in V.linear_bar_rects(nbars, i, h, size):
-            x, top, bw, hh = rect
-            assert x >= 0, (mode, size, i, rect)
-            assert x + bw <= w, (mode, size, i, rect)
-            assert top >= 0, (mode, size, i, rect)
-            assert top + hh <= h, (mode, size, i, rect)
+    if mode == V.MODE_UP:
+        rect_fn = V.linear_bar_rects
+    elif mode == V.MODE_MIRROR:
+        rect_fn = V.mirror_bar_rects
+    else:
+        rect_fn = None
+    if rect_fn is not None:
+        for i in range(nbars):
+            for rect in rect_fn(nbars, i, h, size):
+                assert_rect(rect, w, h, (V.MODES[mode], size, i))
     # pixel-level scan of the full frame after drawing: nothing may exceed the window
     surface = pygame.Surface(size)
     surface.fill(SENTINEL)
@@ -52,10 +63,12 @@ def check(mode, nbars, size):
 def main():
     pygame.init()
     for size in SIZES:
-        check(V.MODE_UP, BARS_COUNT, size)
+        for mode in ALL_MODES:
+            check(mode, BARS_COUNT, size)
         for nbars in (8, 40, 96):
             check(V.MODE_UP, nbars, size)
-    print("BOUNDS_TEST_OK: all linear bars stay inside the window on every size")
+            check(V.MODE_MIRROR, nbars, size)
+    print("BOUNDS_TEST_OK: all modes stay inside the window on every size")
     return 0
 
 

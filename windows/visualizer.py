@@ -38,7 +38,9 @@ MIN_WIN_H = 240
 
 MODE_UP = 0
 MODE_RADIAL = 1
-MODES = ["Bottom-Up", "Radial"]
+MODE_MIRROR = 2
+MODE_RING = 3
+MODES = ["Bottom-Up", "Radial", "Mirror", "Ring"]
 
 COLOR_SCHEMES = []
 
@@ -177,6 +179,17 @@ def set_dark_title_bar():
                 break
     except Exception:
         pass
+
+
+_MUTEX_HANDLE = None
+
+
+def create_app_mutex():
+    global _MUTEX_HANDLE
+    try:
+        _MUTEX_HANDLE = ctypes.windll.kernel32.CreateMutexW(None, False, "MyVisualizer_Mutex")
+    except Exception:
+        _MUTEX_HANDLE = None
 
 
 class AudioCapture:
@@ -375,6 +388,18 @@ def _gradient_surface(cb, ct, w, h):
     return pygame.surfarray.make_surface(arr)
 
 
+def _hgradient_surface(cb, ct, w, h):
+    t = np.linspace(0.0, 1.0, w, dtype=np.float32)
+    cols = np.stack(
+        [cb[0] + (ct[0] - cb[0]) * t,
+         cb[1] + (ct[1] - cb[1]) * t,
+         cb[2] + (ct[2] - cb[2]) * t],
+        axis=-1,
+    ).astype(np.uint8)
+    arr = np.ascontiguousarray(np.repeat(cols[None, :, :], h, axis=0))
+    return pygame.surfarray.make_surface(arr)
+
+
 def draw_gradient_column(surface, x, w, col_top, col_h, cb, ct):
     if col_h <= 0 or w <= 0:
         return
@@ -397,6 +422,26 @@ def linear_bar_rects(nbars, i, hgt, size):
     return [(x, cur_h - hgt, bar_w, hgt)]
 
 
+def mirror_bar_rects(nbars, i, hgt, size):
+    cur_w, cur_h = size
+    bar_gap = 2
+    bar_w = (cur_w - nbars * bar_gap) // nbars
+    if bar_w < 2:
+        bar_gap = 1
+        bar_w = (cur_w - nbars * bar_gap) // nbars
+    if bar_w < 1:
+        bar_w = 1
+        bar_gap = 1
+    bar_stride = bar_w + bar_gap
+    cy = cur_h // 2
+    half = max(0, min(int(round(hgt / 2.0)), cy, cur_h - cy))
+    x = min(i * bar_stride, cur_w - bar_w)
+    return [
+        (x, cy - half, bar_w, half),
+        (x, cy, bar_w, half),
+    ]
+
+
 def draw_bars(surface, mode, levels, scheme, frame):
     cur_w, cur_h = surface.get_size()
     nbars = levels.shape[0]
@@ -411,7 +456,17 @@ def draw_bars(surface, mode, levels, scheme, frame):
             for x, col_top, bw, hh in linear_bar_rects(nbars, i, hgt, (cur_w, cur_h)):
                 draw_gradient_column(surface, x, bw, col_top, hh, top, bottom)
 
-    else:  # MODE_RADIAL
+    elif mode == MODE_MIRROR:
+        for i in range(nbars):
+            lev = float(levels[i])
+            hgt = int(round(lev * cur_h))
+            if hgt < 1:
+                continue
+            top, bottom = scheme_colors(lev, i, scheme, frame)
+            for x, col_top, bw, hh in mirror_bar_rects(nbars, i, hgt, (cur_w, cur_h)):
+                draw_gradient_column(surface, x, bw, col_top, hh, top, bottom)
+
+    elif mode == MODE_RADIAL:
         cx, cy = cur_w // 2, cur_h // 2
         base_r = max(24.0, min(cur_w, cur_h) * 0.14)
         max_r = max(base_r + 12.0, min(cur_w, cur_h) * 0.48)
@@ -442,6 +497,36 @@ def draw_bars(surface, mode, levels, scheme, frame):
             pygame.draw.circle(surface, top, (int(mx), int(my)), max(1, int(tip_w / 2)))
         pygame.draw.circle(surface, (8, 8, 18), (cx, cy), int(base_r * 0.82))
 
+    elif mode == MODE_RING:
+        cx, cy = cur_w // 2, cur_h // 2
+        outer_r = max(40.0, min(cur_w, cur_h) * 0.46)
+        inner_r = max(16.0, outer_r * 0.72)
+        step = 2.0 * math.pi / nbars
+        pygame.draw.circle(surface, (66, 66, 96), (cx, cy), int(outer_r), 2)
+        for i in range(nbars):
+            lev = float(levels[i])
+            if lev <= 0.02:
+                continue
+            thick = (outer_r - inner_r) * lev
+            if thick <= 0.5:
+                continue
+            ang = -math.pi / 2 + i * step
+            half = step * 0.38
+            a1, a2 = ang - half, ang + half
+            c1, s1 = math.cos(a1), math.sin(a1)
+            c2, s2 = math.cos(a2), math.sin(a2)
+            top, _ = scheme_colors(lev, i, scheme, frame)
+            pygame.draw.polygon(
+                surface, top,
+                [
+                    (cx + c1 * inner_r, cy + s1 * inner_r),
+                    (cx + c2 * inner_r, cy + s2 * inner_r),
+                    (cx + c2 * (inner_r + thick), cy + s2 * (inner_r + thick)),
+                    (cx + c1 * (inner_r + thick), cy + s1 * (inner_r + thick)),
+                ],
+            )
+        pygame.draw.circle(surface, (8, 8, 18), (cx, cy), int(inner_r))
+
 
 def _trunc(text, font, max_w):
     if font.size(text)[0] <= max_w:
@@ -468,9 +553,12 @@ def draw_ui(surface, fps, nbars, capture, gate, size, scheme_name, mode_name,
     accent = (210, 220, 235)
     dim = (140, 155, 185)
 
-    if mode == MODE_RADIAL:
+    if mode in (MODE_RADIAL, MODE_RING):
         cx, cy = cur_w // 2, cur_h // 2
-        base_r = max(24.0, min(cur_w, cur_h) * 0.14)
+        if mode == MODE_RADIAL:
+            base_r = max(24.0, min(cur_w, cur_h) * 0.14)
+        else:
+            base_r = max(16.0, min(cur_w, cur_h) * 0.46 * 0.72)
         small = pygame.font.Font(None, 19)
         head_f = pygame.font.Font(None, 24)
         tiny = pygame.font.Font(None, 15)
@@ -540,6 +628,7 @@ def main():
 
     verbose = args.verbose
     enable_dpi_awareness()
+    create_app_mutex()
     pygame.init()
     pygame.key.set_repeat(400, 40)
 
